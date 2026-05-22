@@ -1,0 +1,9 @@
+# Playwright fallback (manual capture via Chromium headed)
+playwright>=1.40.0
+
+# HTTP client untuk push_to_socialpulse
+requests>=2.31.0
+
+# Local server yang nerima POST dari Chrome extension
+# (extension_server.py, port 5099 default)
+flask>=3.0.0

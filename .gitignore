@@ -1,0 +1,18 @@
+# Sessions berisi cookie auth — JANGAN commit
+sessions/
+multi_capture_config.json
+
+# Persistent browser profiles (heavy: ~50-200MB per akun, contains
+# cache/cookies/IndexedDB). v2 (8 Mei 2026): pakai launch_persistent_context
+# untuk anti-bot. JANGAN commit.
+sessions/.profiles/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
