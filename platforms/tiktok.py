@@ -42,10 +42,18 @@ class TikTokCapture(LoginCapture):
     # Cookie names di Playwright = nama asli ('msToken', bukan 'ms_token'
     # yang itu naming SocialPulse internal).
     REQUIRED_COOKIES = ("sessionid", "msToken")
-    # TikTok selalu English-region UA biar konsisten dengan TikTokApi
-    # context_options di tiktok-pc/tiktok_remote.py (yang pakai en-US).
-    LOCALE = "en-US"
-    TIMEZONE = "America/New_York"
+    # Setelah login, buka halaman search sekali. Ini memicu TikTok menulis
+    # signing keys ke localStorage dari konteks search — kunci yang divalidasi
+    # endpoint /api/search/item/full/ (yang selama ini balas size=0 di scraper).
+    POST_LOGIN_VISIT_URL = "https://www.tiktok.com/search/video?q=bus"
+    # PENTING: locale HARUS sama dengan pc-scraper/tiktok_scraper.py yang
+    # sekarang aktif (id-ID / Asia/Jakarta). Sebelumnya di-set en-US biar
+    # cocok dengan TikTokApi lama (tiktok-pc), tapi TikTokApi sudah tidak
+    # dipakai. Kalau cookie di-capture sebagai sesi en-US lalu dipakai ulang
+    # oleh browser id-ID, TikTok anggap itu session pindah negara → captcha
+    # terus + endpoint search dimatikan (size=0). Samakan supaya konsisten.
+    LOCALE = "id-ID"
+    TIMEZONE = "Asia/Jakarta"
 
     def is_logged_in(self, page: Page) -> bool:
         try:

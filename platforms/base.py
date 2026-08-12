@@ -287,6 +287,10 @@ class LoginCapture:
     PLATFORM: str = "override-me"
     LOGIN_URL: str = ""
     POST_LOGIN_HINT: str = ""  # kalimat yang ditampilkan ke user setelah browser kebuka
+    # URL yang dibuka SETELAH login terdeteksi, sebelum capture storage_state.
+    # Dipakai TikTok untuk memicu TikTok JS menulis signing keys ke localStorage
+    # dari konteks halaman search. Kosong = lewati.
+    POST_LOGIN_VISIT_URL: str = ""
     REQUIRED_COOKIES: tuple = ()  # cookies yang wajib ada supaya scraping jalan
     LOCALE: str = "id-ID"
     TIMEZONE: str = "Asia/Jakarta"
@@ -441,6 +445,27 @@ class LoginCapture:
                 except Exception:
                     pass
 
+    def _post_login_visit(self, page, finished_event) -> None:
+        """
+        Buka POST_LOGIN_VISIT_URL (kalau di-set) supaya JS platform menulis
+        data tambahan ke localStorage sebelum kita capture storage_state.
+        No-op kalau URL kosong. Error di sini tidak fatal — capture tetap lanjut.
+        """
+        url = getattr(self, "POST_LOGIN_VISIT_URL", "") or ""
+        if not url:
+            return
+        try:
+            self._status(
+                f"[{self.PLATFORM}] Membuka halaman search untuk melengkapi "
+                f"localStorage… Kalau muncul captcha, selesaikan dulu."
+            )
+            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            # Beri waktu JS menulis signing keys + biar user sempat selesaikan
+            # captcha search kalau muncul (beda dari captcha login).
+            page.wait_for_timeout(6_000)
+        except Exception as e:
+            self._status(f"[{self.PLATFORM}] Post-login visit soft-error: {e}")
+
     def _do_capture(self, context, page, out_path, finished_event) -> CaptureResult:
         """Common capture flow — dipakai by both persistent & ephemeral mode."""
         try:
@@ -458,6 +483,13 @@ class LoginCapture:
 
             # Wait loop: user login manual, kita poll is_logged_in
             self._wait_for_login(page, finished_event)
+
+            # Post-login visit hook. Untuk TikTok, kita perlu buka halaman SEARCH
+            # sekali supaya TikTok JS meng-generate & menyimpan signing keys ke
+            # localStorage (msToken versi LS, ARGUS_XSS_V3, security-sdk keys).
+            # Tanpa ini, storage_state cuma punya LS dari feed — belum tentu
+            # lengkap untuk endpoint search yang dipakai scraper.
+            self._post_login_visit(page, finished_event)
 
             # Capture context.storage_state() dan validate sebelum overwrite file.
             state = context.storage_state()
