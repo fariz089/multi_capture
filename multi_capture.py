@@ -42,7 +42,9 @@ from pathlib import Path
 from tkinter import ttk, messagebox, filedialog
 
 from platforms import PLATFORMS, CaptureResult
-from push_to_socialpulse import push_to_socialpulse, PUSHABLE
+from push_to_socialpulse import (
+    push_to_socialpulse, login_socialpulse, validate_socialpulse_token, PUSHABLE,
+)
 
 # Extension server — optional. Kalau Flask gak ke-install, mode degraded
 # (Playwright capture tetap jalan, tombol extension status nunjukkin disabled).
@@ -69,7 +71,7 @@ logging.basicConfig(
 
 
 # ---------------------------------------------------------------------------
-# Config persistence (remember last SocialPulse URL & JWT)
+# Config persistence (remember SocialPulse URL, username & cached JWT)
 # ---------------------------------------------------------------------------
 def load_config() -> dict:
     if CONFIG_PATH.exists():
@@ -79,7 +81,11 @@ def load_config() -> dict:
             pass
     return {
         "socialpulse_url": "http://localhost:3001",
+        "socialpulse_username": "admin",
+        # JWT boleh di-cache supaya restart app tidak perlu login lagi selama
+        # token masih valid. Password TIDAK PERNAH disimpan ke config.
         "socialpulse_jwt": "",
+        "socialpulse_user": None,
         "last_labels": {},  # platform -> last label used
     }
 
@@ -258,19 +264,46 @@ class MultiCaptureApp:
         except Exception:
             pass
 
-        # ==== Top: SocialPulse config ====
-        cfg_frame = ttk.LabelFrame(self.root, text="SocialPulse Backend (untuk auto-push)", padding=8)
+        # ==== Top: SocialPulse auth/config ====
+        cfg_frame = ttk.LabelFrame(self.root, text="SocialPulse Backend (login untuk auto-push)", padding=8)
         cfg_frame.pack(fill="x", padx=10, pady=(10, 4))
 
         ttk.Label(cfg_frame, text="API URL:").grid(row=0, column=0, sticky="w", padx=(0, 6))
         self.url_var = tk.StringVar(value=self.cfg.get("socialpulse_url", "http://localhost:3001"))
         ttk.Entry(cfg_frame, textvariable=self.url_var, width=42).grid(row=0, column=1, sticky="we")
 
-        ttk.Label(cfg_frame, text="JWT (kosong = no auth):").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=(4, 0))
-        self.jwt_var = tk.StringVar(value=self.cfg.get("socialpulse_jwt", ""))
-        ttk.Entry(cfg_frame, textvariable=self.jwt_var, width=42, show="*").grid(row=1, column=1, sticky="we", pady=(4, 0))
-        ttk.Button(cfg_frame, text="Save Config", command=self._save_config_now).grid(row=0, column=2, rowspan=2, padx=(8, 0))
+        ttk.Label(cfg_frame, text="Username / Email:").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=(4, 0))
+        self.sp_username_var = tk.StringVar(value=self.cfg.get("socialpulse_username", "admin"))
+        ttk.Entry(cfg_frame, textvariable=self.sp_username_var, width=42).grid(row=1, column=1, sticky="we", pady=(4, 0))
+
+        ttk.Label(cfg_frame, text="Password:").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=(4, 0))
+        self.sp_password_var = tk.StringVar(value="")
+        self.sp_password_entry = ttk.Entry(cfg_frame, textvariable=self.sp_password_var, width=42, show="•")
+        self.sp_password_entry.grid(row=2, column=1, sticky="we", pady=(4, 0))
+        self.sp_password_entry.bind("<Return>", lambda _e: self._login_socialpulse())
+
+        auth_buttons = ttk.Frame(cfg_frame)
+        auth_buttons.grid(row=0, column=2, rowspan=3, sticky="ns", padx=(8, 0))
+        self.sp_login_btn = ttk.Button(auth_buttons, text="Login to SocialPulse", command=self._login_socialpulse)
+        self.sp_login_btn.pack(fill="x")
+        ttk.Button(auth_buttons, text="Logout", command=self._logout_socialpulse).pack(fill="x", pady=(4, 0))
+        ttk.Button(auth_buttons, text="Save URL/User", command=self._save_config_now).pack(fill="x", pady=(4, 0))
+
+        self.sp_auth_status_var = tk.StringVar(value="○ Not connected")
+        self.sp_auth_status_label = tk.Label(
+            cfg_frame, textvariable=self.sp_auth_status_var, anchor="w",
+            foreground="#888", font=("Segoe UI", 9, "bold"),
+        )
+        self.sp_auth_status_label.grid(row=3, column=0, columnspan=3, sticky="we", pady=(7, 0))
+        ttk.Label(
+            cfg_frame,
+            text="Password hanya dipakai saat login dan tidak disimpan ke multi_capture_config.json.",
+            foreground="#888", font=("Segoe UI", 8, "italic"),
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))
         cfg_frame.columnconfigure(1, weight=1)
+
+        # Kalau ada JWT dari run sebelumnya, validasi ke /api/auth/me.
+        self.root.after(250, self._validate_cached_socialpulse_auth)
 
         # ==== Extension server status banner ====
         ext_frame = ttk.LabelFrame(self.root, text="Chrome Extension Bridge (recommended)", padding=8)
@@ -347,7 +380,7 @@ class MultiCaptureApp:
         self.log_text.tag_config("error", foreground="#ff7875")
         self.log_text.tag_config("muted", foreground="#888")
 
-        self._log("Tool ready. Pilih platform → Login → Push to SocialPulse.", "muted")
+        self._log("Tool ready. Login ke SocialPulse di atas, lalu pilih platform → Capture → Push.", "muted")
 
     def _build_platform_tab(self, parent: ttk.Frame, platform_key: str) -> dict:
         """Build content per tab. Returns dict of widgets buat referensi."""
@@ -680,7 +713,9 @@ class MultiCaptureApp:
                 return
 
         url = self.url_var.get().strip()
-        jwt = self.jwt_var.get().strip()
+        username = self.sp_username_var.get().strip()
+        password = self.sp_password_var.get()
+        jwt = str(self.cfg.get("socialpulse_jwt") or "").strip()
         if not url:
             messagebox.showerror("Error", "API URL kosong.")
             return
@@ -700,24 +735,91 @@ class MultiCaptureApp:
             )
             self.current_finished_event.set()
 
-        # Save config (URL/JWT) sebelum push
+        # Save URL + username sebelum push. Password tidak pernah disimpan.
         self._save_config_now(silent=True)
 
         self._log(f"Pushing {platform_key}/{label} → {url} ...", "info")
 
         def worker():
+            token = jwt
+            auth_user = None
+
+            # Kalau belum punya cached token tetapi credentials diisi, login
+            # otomatis dulu. Jadi user tidak perlu klik Login secara eksplisit.
+            if not token:
+                if not username or not password:
+                    res = {
+                        "ok": False,
+                        "status_code": 401,
+                        "error": "Login SocialPulse diperlukan. Isi username/email + password lalu klik Login (atau langsung Push).",
+                        "response_json": {"error": "SocialPulse login required"},
+                        "auth_required": True,
+                    }
+                    self.root.after(0, self._on_push_result, res, platform_key, label)
+                    return
+
+                login_res = login_socialpulse(url, username, password)
+                if not login_res.get("ok"):
+                    login_res["auth_required"] = True
+                    self.root.after(0, self._on_push_result, login_res, platform_key, label)
+                    return
+                token = login_res.get("token") or ""
+                auth_user = login_res.get("user")
+
             res = push_to_socialpulse(
                 session_path=path,
                 platform=platform_key,
                 label=label,
                 api_url=url,
-                jwt_token=jwt or None,
+                jwt_token=token or None,
             )
+
+            # Cached JWT mungkin expired/revoked. Kalau credentials sedang
+            # tersedia, re-login dan retry tepat satu kali.
+            if (
+                not res.get("ok")
+                and res.get("status_code") in (401, 403)
+                and username
+                and password
+            ):
+                self._enqueue_log("SocialPulse token expired/invalid — re-login otomatis lalu retry push...")
+                login_res = login_socialpulse(url, username, password)
+                if login_res.get("ok"):
+                    token = login_res.get("token") or ""
+                    auth_user = login_res.get("user")
+                    res = push_to_socialpulse(
+                        session_path=path,
+                        platform=platform_key,
+                        label=label,
+                        api_url=url,
+                        jwt_token=token or None,
+                    )
+                else:
+                    res = login_res
+                    res["auth_required"] = True
+
+            if token and auth_user:
+                res["_new_auth_token"] = token
+                res["_new_auth_user"] = auth_user
+
             self.root.after(0, self._on_push_result, res, platform_key, label)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_push_result(self, res: dict, platform_key: str, label: str):
+        # Login otomatis saat push bisa menghasilkan token baru. Cache token,
+        # tapi jangan pernah cache password.
+        new_token = res.pop("_new_auth_token", None)
+        new_user = res.pop("_new_auth_user", None)
+        if new_token:
+            self._store_socialpulse_auth(new_token, new_user)
+
+        if res.get("status_code") in (401, 403) and not res.get("ok"):
+            self._clear_socialpulse_token(keep_username=True)
+            self._set_socialpulse_auth_status(
+                "✗ Session SocialPulse expired / login diperlukan", "error"
+            )
+
         if res.get("ok"):
             self._log(
                 f"✓ Pushed {platform_key}/{label} ke SocialPulse — "
@@ -766,13 +868,139 @@ class MultiCaptureApp:
         except Exception as e:
             self._log(f"✗ Export gagal: {e}", "error")
 
+    # ---------------- SocialPulse auth ----------------
+    def _set_socialpulse_auth_status(self, text: str, kind: str = "muted"):
+        self.sp_auth_status_var.set(text)
+        colors = {
+            "success": "#52c41a",
+            "error": "#ff4d4f",
+            "warn": "#d4a017",
+            "muted": "#888",
+            "info": "#1677ff",
+        }
+        try:
+            self.sp_auth_status_label.configure(foreground=colors.get(kind, "#888"))
+        except Exception:
+            pass
+
+    def _store_socialpulse_auth(self, token: str, user: dict | None):
+        self.cfg["socialpulse_url"] = self.url_var.get().strip()
+        self.cfg["socialpulse_username"] = self.sp_username_var.get().strip()
+        self.cfg["socialpulse_jwt"] = token or ""
+        self.cfg["socialpulse_user"] = user if isinstance(user, dict) else None
+        save_config(self.cfg)
+
+        if isinstance(user, dict):
+            username = user.get("username") or user.get("email") or "user"
+            role = user.get("role") or "user"
+            self._set_socialpulse_auth_status(
+                f"✓ Connected as {username} ({role})", "success"
+            )
+        else:
+            self._set_socialpulse_auth_status("✓ Connected to SocialPulse", "success")
+
+    def _clear_socialpulse_token(self, keep_username: bool = True):
+        self.cfg["socialpulse_jwt"] = ""
+        self.cfg["socialpulse_user"] = None
+        if not keep_username:
+            self.cfg["socialpulse_username"] = ""
+            self.sp_username_var.set("")
+        save_config(self.cfg)
+
+    def _login_socialpulse(self):
+        url = self.url_var.get().strip()
+        username = self.sp_username_var.get().strip()
+        password = self.sp_password_var.get()
+
+        if not url:
+            messagebox.showerror("Login SocialPulse", "API URL kosong.")
+            return
+        if not username or not password:
+            messagebox.showerror("Login SocialPulse", "Isi username/email dan password.")
+            return
+
+        self._save_config_now(silent=True)
+        self._set_socialpulse_auth_status("… Logging in to SocialPulse", "info")
+        self.sp_login_btn.configure(state="disabled")
+        self._log(f"Login SocialPulse as {username} → {url} ...", "info")
+
+        def worker():
+            res = login_socialpulse(url, username, password)
+            self.root.after(0, self._on_socialpulse_login_result, res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_socialpulse_login_result(self, res: dict):
+        self.sp_login_btn.configure(state="normal")
+        if res.get("ok"):
+            self._store_socialpulse_auth(res.get("token") or "", res.get("user"))
+            user = res.get("user") or {}
+            who = user.get("username") or user.get("email") or self.sp_username_var.get().strip()
+            self._log(f"✓ SocialPulse login OK: {who}", "success")
+            # Password sengaja tidak disimpan. Biarkan field selama app hidup
+            # supaya auto re-login bisa bekerja bila JWT expire di tengah sesi.
+            return
+
+        self._clear_socialpulse_token(keep_username=True)
+        err = res.get("error") or "Login failed"
+        self._set_socialpulse_auth_status(f"✗ Login failed: {err}", "error")
+        self._log(f"✗ SocialPulse login gagal: {err}", "error")
+        messagebox.showerror(
+            "Login SocialPulse Gagal",
+            f"Error: {err}\n\nStatus: {res.get('status_code')}",
+        )
+
+    def _validate_cached_socialpulse_auth(self):
+        token = str(self.cfg.get("socialpulse_jwt") or "").strip()
+        url = self.url_var.get().strip()
+        if not token or not url:
+            self._set_socialpulse_auth_status("○ Not connected — login diperlukan sebelum push", "muted")
+            return
+
+        self._set_socialpulse_auth_status("… Checking saved SocialPulse session", "info")
+
+        def worker():
+            res = validate_socialpulse_token(url, token)
+            self.root.after(0, self._on_cached_auth_validation, res, token)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_cached_auth_validation(self, res: dict, token: str):
+        if res.get("ok"):
+            user = res.get("user") or {}
+            # Sync username field ke server identity kalau ada.
+            if user.get("username"):
+                self.sp_username_var.set(user["username"])
+            self._store_socialpulse_auth(token, user)
+            self._log("✓ Saved SocialPulse session masih valid.", "success")
+            return
+
+        if res.get("status_code") is None:
+            # Backend sedang offline/tidak reachable: jangan buang token yang
+            # mungkin sebenarnya masih valid. Nanti push akan mencoba lagi.
+            self._set_socialpulse_auth_status("⚠ Backend tidak reachable — saved session dipertahankan", "warn")
+            self._log(f"Tidak bisa validasi saved SocialPulse session: {res.get('error')}", "warn")
+            return
+
+        self._clear_socialpulse_token(keep_username=True)
+        self._set_socialpulse_auth_status("○ Saved session expired — silakan login", "warn")
+        self._log("Saved SocialPulse JWT sudah invalid/expired; login ulang diperlukan.", "warn")
+
+    def _logout_socialpulse(self):
+        self._clear_socialpulse_token(keep_username=True)
+        self.sp_password_var.set("")
+        self._set_socialpulse_auth_status("○ Logged out from SocialPulse", "muted")
+        self._log("SocialPulse token dihapus dari Multi-Capture.", "muted")
+
     # ---------------- Config save ----------------
     def _save_config_now(self, silent: bool = False):
         self.cfg["socialpulse_url"] = self.url_var.get().strip()
-        self.cfg["socialpulse_jwt"] = self.jwt_var.get().strip()
+        self.cfg["socialpulse_username"] = self.sp_username_var.get().strip()
+        # socialpulse_jwt hanya diubah oleh login/logout/validation; password
+        # tidak pernah dimasukkan ke cfg.
         save_config(self.cfg)
         if not silent:
-            self._log("Config saved.", "muted")
+            self._log("Config URL/username saved (password tidak disimpan).", "muted")
 
     # ---------------- Log helpers ----------------
     def _enqueue_log(self, msg: str):

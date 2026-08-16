@@ -60,7 +60,7 @@ Chrome extension bawaan (folder `chrome_extension/`) bisa:
 
 1. Login ke platform target (FB/IG/TikTok/Twitter/Threads) di tab Chrome **biasa** (bukan tab popup extension)
 2. Klik icon extension di toolbar — popup keluar, otomatis detect platform dari tab aktif
-3. Isi label akun (mis. `ig_main`, `fb_alt_1`)
+5. Isi label akun (mis. `ig_main`, `fb_alt_1`)
 4. Klik tombol platform yang sesuai — extension extract cookies + localStorage → POST ke local server
 5. Status "✓ Captured ..." muncul. Buka GUI multi_capture — tab platform itu otomatis switch + label ke-fill, klik **⬆ Push to SocialPulse**
 
@@ -117,14 +117,16 @@ python multi_capture.py
 ```
 
 Flow:
-1. Set **API URL** SocialPulse di atas (default `http://localhost:3001`). JWT optional kalau auth aktif.
-2. Pilih tab platform.
-3. Input **label akun** (bebas, buat identifier, mis. `fb_alt_1`, `tiktok_main`, `ig_brand`, `tw_news`).
-4. Klik **🌐 Buka Browser & Login** — Chromium kebuka headed.
-5. Login manual di window itu (selesaikan 2FA / captcha kalau ada).
-6. Sistem **auto-detect** saat cookies penting terbaca, ATAU klik **✓ Saya Sudah Login** kalau auto-detect telat.
-7. Cookies disimpan ke `sessions/{platform}_{label}.json` (Playwright storage_state format).
-8. Klik **⬆ Push to SocialPulse** untuk auto-add via `POST /api/accounts`. Atau **💾 Save As...** untuk dapet file copy.
+1. Set **API URL** SocialPulse di atas (default `http://localhost:3001`).
+2. Isi **Username / Email** + **Password**, lalu klik **Login to SocialPulse**. Tool akan mengambil JWT otomatis dari `/api/auth/login`. Password tidak disimpan ke config. JWT yang masih valid di-cache dan dicek lagi ke `/api/auth/me` saat app dibuka.
+3. Kalau JWT expire saat push dan field password masih terisi, Multi-Capture otomatis login ulang dan retry push satu kali.
+4. Pilih tab platform.
+5. Input **label akun** (bebas, buat identifier, mis. `fb_alt_1`, `tiktok_main`, `ig_brand`, `tw_news`).
+6. Klik **🌐 Buka Browser & Login** — Chromium kebuka headed.
+7. Login manual di window itu (selesaikan 2FA / captcha kalau ada).
+8. Sistem **auto-detect** saat cookies penting terbaca, ATAU klik **✓ Saya Sudah Login** kalau auto-detect telat.
+9. Cookies disimpan ke `sessions/{platform}_{label}.json` (Playwright storage_state format).
+10. Klik **⬆ Push to SocialPulse** untuk auto-add via `POST /api/accounts`. Atau **💾 Save As...** untuk dapet file copy.
 
 ### Output format
 
@@ -209,6 +211,8 @@ Buka file `sessions/{platform}_{label}.json`, copy isinya, paste ke field **Cook
 
 **Auto-detect login gak jalan padahal udah login** → klik tombol **✓ Saya Sudah Login** manual di GUI. Cookies tetap ke-save.
 
+**Push gagal: "Access token required" / HTTP 401** → login ke SocialPulse pada panel paling atas. Jangan copy-paste JWT manual lagi; Multi-Capture akan mengambil token sendiri.
+
 **Push gagal: "no_active_accounts"** → backend SocialPulse belum reachable di URL itu. Cek `docker ps` dan API URL di GUI.
 
 **Push gagal: "c_user format invalid"** → session yang ke-save belum login penuh. Re-login (hapus session file dulu, atau pakai label baru).
@@ -255,7 +259,7 @@ multi_capture/
 │   └── .profiles/             # Persistent Chromium profiles per-label (gitignored)
 ├── requirements.txt
 ├── run.bat                    # Windows double-click launcher
-├── multi_capture_config.json  # Remember last URL/JWT (gitignored)
+├── multi_capture_config.json  # Remember URL/username/cached JWT (password tidak disimpan)
 ├── .gitignore
 └── README.md
 ```
@@ -264,7 +268,9 @@ multi_capture/
 
 `multi_capture_config.json` (gitignored) menyimpan:
 - `socialpulse_url` — last API URL
-- `socialpulse_jwt` — last JWT (kalau auth aktif)
+- `socialpulse_username` — username/email terakhir (aman disimpan)
+- `socialpulse_jwt` — cached JWT; divalidasi ke `/api/auth/me` saat startup
+- **Password tidak pernah disimpan** ke config.
 - `last_labels` — last label per platform (autofill saat next run)
 
 Hapus file ini buat reset.

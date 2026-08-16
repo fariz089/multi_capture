@@ -167,6 +167,104 @@ def _is_parser_error(resp_json: dict, status_code: int) -> bool:
     return any(kw in err_text for kw in parser_keywords)
 
 
+
+def _json_response(resp) -> dict:
+    """Best-effort JSON parser untuk response backend."""
+    try:
+        data = resp.json()
+        return data if isinstance(data, dict) else {"data": data}
+    except Exception:
+        return {"raw_text": (resp.text or "")[:500]}
+
+
+def login_socialpulse(
+    api_url: str,
+    username: str,
+    password: str,
+    timeout: int = 15,
+) -> dict:
+    """
+    Login ke SocialPulse dan return JWT tanpa menyimpan password.
+
+    Backend auth-admin-ready menerima username ATAU email pada field
+    ``username`` dan mengembalikan {success, token, user, expires_in}.
+    """
+    api_url = (api_url or "").strip().rstrip("/")
+    username = (username or "").strip()
+    if not api_url:
+        return {"ok": False, "error": "API URL kosong", "status_code": None}
+    if not username or not password:
+        return {"ok": False, "error": "Username/email dan password wajib diisi", "status_code": 400}
+
+    try:
+        resp = requests.post(
+            api_url + "/api/auth/login",
+            json={"username": username, "password": password},
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        )
+    except requests.RequestException as e:
+        return {"ok": False, "error": f"Network error: {e}", "status_code": None}
+
+    data = _json_response(resp)
+    token = data.get("token") if isinstance(data, dict) else None
+    if resp.ok and token:
+        return {
+            "ok": True,
+            "status_code": resp.status_code,
+            "token": token,
+            "user": data.get("user") or {},
+            "expires_in": data.get("expires_in"),
+            "response_json": data,
+            "error": None,
+        }
+
+    return {
+        "ok": False,
+        "status_code": resp.status_code,
+        "response_json": data,
+        "error": data.get("error") or f"HTTP {resp.status_code}",
+    }
+
+
+def validate_socialpulse_token(
+    api_url: str,
+    jwt_token: str,
+    timeout: int = 10,
+) -> dict:
+    """Validasi cached JWT ke GET /api/auth/me dan ambil identity terbaru."""
+    api_url = (api_url or "").strip().rstrip("/")
+    token = (jwt_token or "").strip()
+    if not api_url or not token:
+        return {"ok": False, "error": "API URL/token kosong", "status_code": 401}
+
+    try:
+        resp = requests.get(
+            api_url + "/api/auth/me",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+        )
+    except requests.RequestException as e:
+        return {"ok": False, "error": f"Network error: {e}", "status_code": None}
+
+    data = _json_response(resp)
+    if resp.ok:
+        return {
+            "ok": True,
+            "status_code": resp.status_code,
+            "user": data,
+            "response_json": data,
+            "error": None,
+        }
+
+    return {
+        "ok": False,
+        "status_code": resp.status_code,
+        "response_json": data,
+        "error": data.get("error") or f"HTTP {resp.status_code}",
+    }
+
+
 def push_to_socialpulse(
     session_path: Path,
     platform: str,
